@@ -13,6 +13,7 @@ pub struct Node {
     pub order: u8, // 0=left, 1=right
     pub data: Hash,
     pub node_type: NodeType,
+    pub index: usize,
 }
 
 #[derive(PartialEq, Default, Clone, Debug)]
@@ -28,9 +29,10 @@ impl Node {
     pub fn is_digest(&self) -> bool {
         self.node_type == NodeType::Digest
     }
-    pub fn digest(batch_id: usize) -> Self {
+    pub fn digest(i: usize, batch_id: usize) -> Self {
         let mut n = Self::default();
         n.batch = (batch_id) as u8;
+        n.index = i;
         n
     }
     pub fn is_compound(&self) -> bool {
@@ -56,21 +58,22 @@ impl AsyncMerkleTree {
         }
         mtnodes.append(
             &mut indexes
-                .into_iter()
-                .map(|leaf_item| Node::digest(leaf_item as usize))
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, leaf_item)| Node::digest(i, leaf_item as usize))
                 .collect(),
         );
         mtnodes
     }
     pub fn init(leaf_count: usize, batch_count: usize, d_id: u8) -> Self {
         //let mt = MerkleTree::empty_tree(leaf_count, batch_count);
-        let mut mtnodes: Vec<Node> =
-            Vec::with_capacity(MerkleTree::calculate_vec_capacity(leaf_count));
-        mtnodes.append(
-            &mut (0..leaf_count)
-                .map(|_| Node::digest(d_id as usize))
-                .collect(),
-        );
+        let mtnodes: Vec<Node> = Vec::with_capacity(MerkleTree::calculate_vec_capacity(leaf_count));
+        // mtnodes.append(
+        //     &mut (0..leaf_count)
+        //         .into_par_iter()
+        //         .map(|i| Node::digest(i, d_id as usize))
+        //         .collect(),
+        // );
         Self {
             nodes: mtnodes,
             // nodes: mt.get_nodes(),
@@ -96,48 +99,54 @@ impl AsyncMerkleTree {
                 batch: batch_id,
                 order: 255,
                 data: hash,
+                index: start + i,
                 node_type: NodeType::Leaf,
             };
-            println!("start: {}, i: {}, len: {}", start, i, items.len());
+            // println!("start: {}, i: {}, len: {}", start, i, items.len());
             self.nodes[start + i] = node;
         }
+        // println!("leaf nodes: {:?}", self.nodes);
 
         let mut level_len = MerkleTree::next_level_len(self.leaf_count);
         let mut level_start = self.leaf_count;
         let mut prev_level_len = self.leaf_count;
         let mut prev_level_start = 0;
+        let mut counter = self.leaf_count;
         while level_len > 0 {
             for i in 0..level_len {
                 let prev_level_idx = 2 * i;
                 let mut lsib = self.nodes[prev_level_start + prev_level_idx].clone();
                 lsib.order = 0;
+                // lsib.index = prev_level_start + prev_level_idx;
                 let mut rsib = if prev_level_idx + 1 < prev_level_len {
-                    println!(
-                        "prev_level_start: {:?}, prev_level_idx: {:?}",
-                        prev_level_start, prev_level_idx
-                    );
+                    // println!(
+                    //     "prev_level_start: {:?}, prev_level_idx: {:?}",
+                    //     prev_level_start, prev_level_idx
+                    // );
                     let mut rnode = self.nodes[prev_level_start + prev_level_idx + 1].clone();
+                    // rnode.index = prev_level_start + prev_level_idx + 1;
                     rnode.order = 1;
                     rnode
                 } else {
                     // Duplicate last entry if the level length is odd
                     let mut rnode = self.nodes[prev_level_start + prev_level_idx].clone();
+                    // rnode.index = prev_level_start + prev_level_idx;
                     rnode.order = 1;
                     rnode
                 };
 
-                println!("lsib: {:?}, rsib:{:?}, level: {:?}", lsib, rsib, level_len);
+                // println!("lsib: {:?}, rsib:{:?}, level: {:?}", lsib, rsib, level_len);
                 let new_node_hash = hash_intermediate!(lsib.data, rsib.data);
                 if lsib.batch != rsib.batch {
-                    println!("mismatch batch");
+                    // println!("mismatch batch");
                     if !lsib.is_digest() && !lsib.is_compound() {
-                        println!("lsib not digest");
+                        // println!("lsib not digest");
                         lsib.node_type = NodeType::Checkpoint;
-                        checkpoints.push(lsib);
+                        checkpoints.push(lsib.clone());
                     }
 
                     if !rsib.is_digest() && !rsib.is_compound() {
-                        println!("rsib not digest");
+                        // println!("rsib not digest");
                         rsib.node_type = NodeType::Checkpoint;
                         checkpoints.push(rsib);
                     }
@@ -146,16 +155,26 @@ impl AsyncMerkleTree {
                         batch: (self.batch_count + 2) as u8,
                         order: 0, //temp 0
                         data: new_node_hash,
+                        index: counter,
                         node_type: NodeType::Compound,
                     };
+                    counter += 1;
                     self.nodes.push(c_node);
                 } else {
                     let new_node = Node {
                         batch: lsib.batch,
                         order: 0, //temp 0
                         data: new_node_hash,
-                        node_type: NodeType::Inter,
+                        index: counter,
+                        node_type: if lsib.is_digest() && rsib.is_digest() {
+                            NodeType::Digest
+                        } else if lsib.is_compound() && rsib.is_compound() {
+                            NodeType::Compound
+                        } else {
+                            NodeType::Inter
+                        },
                     };
+                    counter += 1;
                     self.nodes.push(new_node);
                 }
             }
@@ -168,7 +187,19 @@ impl AsyncMerkleTree {
         // mt
     }
 
-    // pub fn commit(checkpoints: Vec<Vec<Node>>) -> Hash {}
+    pub fn commit(checkpoints: Vec<Vec<Node>>) -> Hash {
+        let mut checkpoints: Vec<Node> = checkpoints.into_iter().flatten().collect();
+        checkpoints.par_sort_unstable_by(|a, b| a.index.cmp(&b.index));
+        let mut comp_node = checkpoints[0].data.clone();
+        for c in checkpoints[1..].into_iter() {
+            if c.order == 1 {
+                comp_node = hash_intermediate!(comp_node, c.data);
+                continue;
+            }
+            comp_node = hash_intermediate!(c.data, comp_node);
+        }
+        comp_node
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -177,42 +208,83 @@ mod tests {
     use super::*;
     // use fast_merkle_tree::*;
 
-    const BLUE: &[&[u8]] = &[b"my", b"very", b"eager", b"mother", b"just", b"served"];
-    const RED: &[&[u8]] = &[b"bad", b"missing"];
+    const BLUE: &[&[u8]] = &[b"my".as_slice(); 80_000];
+    const RED: &[&[u8]] = &[b"bad".as_slice(); 20_000];
 
     use lazy_static::lazy_static;
     lazy_static! {
         pub static ref PAR_THREAD_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
+            .num_threads(2)
             .thread_name(|i| format!("solBstoreProc{i:02}"))
             .build()
             .unwrap();
     }
 
     #[tokio::test]
-    async fn something() {
+    async fn test_amt() {
         let batches = vec![(0u32, BLUE, 0), (1, RED, BLUE.len())];
-        let digest_tree = AsyncMerkleTree::build_digest_tree(batches.clone(), 8);
+
+        let i1 = Instant::now();
+        let digest_tree = AsyncMerkleTree::build_digest_tree(batches.clone(), 100_000);
+        let a1 = i1.elapsed();
+
+        println!("empty tree took: {:?}", a1.as_millis());
 
         let response: Vec<Vec<Node>> = PAR_THREAD_POOL.install(|| {
             batches
+                .clone()
                 .into_par_iter()
                 .map(|(i, leaf_batch, start)| {
-                    let mut amt = AsyncMerkleTree::init(8, 1, (i + 1) as u8);
+                    let mut amt = AsyncMerkleTree::init(100_000, 2, (i + 1) as u8);
                     amt.nodes = digest_tree.clone();
+
+                    let i1 = Instant::now();
                     let checkpoints = amt.append_batch(leaf_batch, (i + 1) as u8, start);
-                    println!("checkpoints: {:?}", checkpoints);
+                    let t1 = i1.elapsed();
+
+                    println!("thread {} took: {}", i, t1.as_millis());
                     checkpoints
                 })
                 .collect()
         });
-        // tree.insert(&[0u8; 32]);
-        // tree.insert(&[0u8; 32]);
-        // tree.insert(&[0u8; 32]);
-        // tree.insert(&[0u8; 32]);
+
+        let i2 = Instant::now();
+        let root = AsyncMerkleTree::commit(response);
+        let t2 = i2.elapsed();
+        println!("async root: {:?}, time: {:?}", root, t2.as_millis());
+
+        let testbatches: Vec<&[u8]> = batches
+            .clone()
+            .into_iter()
+            .map(|b| b.1.to_vec())
+            .flatten()
+            .collect();
+
+        let i3 = Instant::now();
+        let mt = MerkleTree::new(testbatches.as_slice());
+        let t3 = i3.elapsed();
+
         println!(
-            "root: {:?}",
-            response // bs58::encode(hash::hashv(&[&[1], &[0u8; 32]]).0).into_string(),
+            "sync root: {:?}, time: {}",
+            mt.get_root().unwrap(),
+            t3.as_millis()
         );
+
+        assert!(mt.get_root().unwrap() == &root);
+        // tree.insert(&[0u8; 32]);
+        // tree.insert(&[0u8; 32]);
+        // tree.insert(&[0u8; 32]);
+        // tree.insert(&[0u8; 32]);
+        // println!(
+        //     "root: {:?}",
+        //     response // bs58::encode(hash::hashv(&[&[1], &[0u8; 32]]).0).into_string(),
+        // );
+        // for (n, it) in response.iter() {
+        //     println!("{} [", n);
+        //     for i in it {
+        //         println!("node: {:?}", i);
+        //     }
+        //     println!("]");
+        // }
     }
 }

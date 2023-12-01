@@ -25,6 +25,7 @@ macro_rules! hash_intermediate {
 pub struct MerkleTree {
     pub leaf_count: usize,
     pub nodes: Vec<Node>,
+    pub n: Vec<Hash>,
 }
 //
 // #[derive(Debug, PartialEq, Eq)]
@@ -105,6 +106,7 @@ impl MerkleTree {
         let cap = MerkleTree::calculate_vec_capacity(leaf_count);
         let mut mt = MerkleTree {
             leaf_count,
+            n: Vec::with_capacity(cap),
             nodes: Vec::with_capacity(cap),
         };
 
@@ -115,7 +117,7 @@ impl MerkleTree {
         // }
 
         mt.nodes
-            .append(&mut vec![Node::digest(batch_count); leaf_count]);
+            .append(&mut vec![Node::digest(0, batch_count); leaf_count]);
 
         let mut level_len = MerkleTree::next_level_len(leaf_count);
         let mut level_start = leaf_count;
@@ -143,50 +145,51 @@ impl MerkleTree {
 
         mt
     }
-    // pub fn new<T: AsRef<[u8]>>(items: &[T]) -> Self {
-    //     let cap = MerkleTree::calculate_vec_capacity(items.len());
-    //     let mut mt = MerkleTree {
-    //         leaf_count: items.len(),
-    //         nodes: Vec::with_capacity(cap),
-    //     };
-    //
-    //     for item in items {
-    //         let item = item.as_ref();
-    //         let hash = hash_leaf!(item);
-    //         let n = Node::default();
-    //         n.data
-    //         mt.nodes.push();
-    //     }
-    //
-    //     let mut level_len = MerkleTree::next_level_len(items.len());
-    //     let mut level_start = items.len();
-    //     let mut prev_level_len = items.len();
-    //     let mut prev_level_start = 0;
-    //     while level_len > 0 {
-    //         for i in 0..level_len {
-    //             let prev_level_idx = 2 * i;
-    //             let lsib = &mt.nodes[prev_level_start + prev_level_idx];
-    //             let rsib = if prev_level_idx + 1 < prev_level_len {
-    //                 &mt.nodes[prev_level_start + prev_level_idx + 1]
-    //             } else {
-    //                 // Duplicate last entry if the level length is odd
-    //                 &mt.nodes[prev_level_start + prev_level_idx]
-    //             };
-    //
-    //             let hash = hash_intermediate!(lsib, rsib);
-    //             mt.nodes.push(hash);
-    //         }
-    //         prev_level_start = level_start;
-    //         prev_level_len = level_len;
-    //         level_start += level_len;
-    //         level_len = MerkleTree::next_level_len(level_len);
-    //     }
-    //
-    //     mt
-    // }
+    pub fn new<T: AsRef<[u8]>>(items: &[T]) -> Self {
+        let cap = MerkleTree::calculate_vec_capacity(items.len());
+        let mut mt = MerkleTree {
+            leaf_count: items.len(),
+            nodes: Vec::with_capacity(cap),
+            n: Vec::with_capacity(cap),
+        };
 
-    pub fn get_root(&self) -> Option<&Node> {
-        self.nodes.iter().last()
+        for item in items {
+            let item = item.as_ref();
+            let hash = hash_leaf!(item);
+            // let n = Node::default();
+            // n.data
+            mt.n.push(hash);
+        }
+
+        let mut level_len = MerkleTree::next_level_len(items.len());
+        let mut level_start = items.len();
+        let mut prev_level_len = items.len();
+        let mut prev_level_start = 0;
+        while level_len > 0 {
+            for i in 0..level_len {
+                let prev_level_idx = 2 * i;
+                let lsib = &mt.n[prev_level_start + prev_level_idx];
+                let rsib = if prev_level_idx + 1 < prev_level_len {
+                    &mt.n[prev_level_start + prev_level_idx + 1]
+                } else {
+                    // Duplicate last entry if the level length is odd
+                    &mt.n[prev_level_start + prev_level_idx]
+                };
+
+                let hash = hash_intermediate!(lsib, rsib);
+                mt.n.push(hash);
+            }
+            prev_level_start = level_start;
+            prev_level_len = level_len;
+            level_start += level_len;
+            level_len = MerkleTree::next_level_len(level_len);
+        }
+
+        mt
+    }
+
+    pub fn get_root(&self) -> Option<&Hash> {
+        self.n.iter().last()
     }
 
     // pub fn find_path(&self, index: usize) -> Option<Proof> {
